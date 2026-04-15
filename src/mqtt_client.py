@@ -4,6 +4,7 @@
 import json
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 import paho.mqtt.client as mqtt
@@ -16,6 +17,8 @@ from src.db import get_connection, get_sensor_id, insert_reading
 logger = logging.getLogger(__name__)
 
 _token_provider: Optional[Callable[[], str]] = None
+# Keyed by device_id; value is time.time() of last successful DB write.
+_last_write: dict[str, float] = {}
 
 
 def _get_sensor_meta(
@@ -82,9 +85,19 @@ def _on_message(client: mqtt.Client, userdata: dict, msg: mqtt.MQTTMessage) -> N
                 logger.warning("Unknown sensor %s — skipping reading", device_id)
                 return
 
-            insert_reading(conn, sensor_id, temperature, humidity, battery, signal_strength)
+            # Hourly throttle — write at most one reading per sensor per hour.
+            now: float = time.time()
+            last: float = _last_write.get(device_id, 0.0)
+            elapsed: float = now - last
+            if elapsed < 3600:
+                logger.debug(
+                    "Throttled reading for %s — last write %.0fs ago", device_id, elapsed
+                )
+            else:
+                insert_reading(conn, sensor_id, temperature, humidity, battery, signal_strength)
+                _last_write[device_id] = now
 
-            # Battery alert check — runs after reading is persisted
+            # Battery alert check — runs unconditionally regardless of throttle.
             if battery is not None and check_battery(
                 conn, sensor_id, battery, config.BATTERY_ALERT_THRESHOLD
             ):
