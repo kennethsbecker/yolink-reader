@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_devices(token: str) -> List[Dict[str, Any]]:
-    """Call DeviceList.fetch via YoLink API and return a list of device dicts."""
+    """Call Home.getDeviceList via YoLink API and return a list of device dicts."""
     payload = json.dumps({
-        "method": "DeviceList.fetch",
+        "method": "Home.getDeviceList",
         "time": __import__("time").time_ns() // 1_000_000,
     }).encode()
 
