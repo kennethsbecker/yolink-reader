@@ -10,11 +10,25 @@ import paho.mqtt.client as mqtt
 import pymysql.connections
 
 import src.config as config
+from src.alerts import check_battery, record_alert, send_battery_alert
 from src.db import get_connection, get_sensor_id, insert_reading
 
 logger = logging.getLogger(__name__)
 
 _token_provider: Optional[Callable[[], str]] = None
+
+
+def _get_sensor_meta(
+    conn: pymysql.connections.Connection, sensor_id: int
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (name, location) for the given sensor primary key."""
+    sql = "SELECT name, location FROM sensors WHERE id = %s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (sensor_id,))
+        row = cur.fetchone()
+    if row:
+        return row["name"], row["location"]
+    return None, None
 
 
 def _on_connect(client: mqtt.Client, userdata: dict, flags: dict, rc: int) -> None:
@@ -67,7 +81,26 @@ def _on_message(client: mqtt.Client, userdata: dict, msg: mqtt.MQTTMessage) -> N
             if sensor_id is None:
                 logger.warning("Unknown sensor %s — skipping reading", device_id)
                 return
+
             insert_reading(conn, sensor_id, temperature, humidity, battery, signal_strength)
+
+            # Battery alert check — runs after reading is persisted
+            if battery is not None and check_battery(
+                conn, sensor_id, battery, config.BATTERY_ALERT_THRESHOLD
+            ):
+                sensor_name, location = _get_sensor_meta(conn, sensor_id)
+                sensor_name = sensor_name or device_id
+                try:
+                    send_battery_alert(sensor_name, device_id, battery, location)
+                    record_alert(conn, sensor_id, battery)
+                    logger.info(
+                        "Battery alert fired — sensor=%s device=%s battery=%d%%",
+                        sensor_name, device_id, battery,
+                    )
+                except Exception as alert_exc:
+                    logger.error(
+                        "Battery alert failed for %s: %s", device_id, alert_exc
+                    )
         finally:
             conn.close()
     except Exception as exc:
