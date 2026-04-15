@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""MQTT client — subscribe to YoLink home topic and persist THSensor readings."""
+
+import json
+import logging
+import threading
+from typing import Callable, Optional
+
+import paho.mqtt.client as mqtt
+import pymysql.connections
+
+import src.config as config
+from src.db import get_connection, get_sensor_id, insert_reading
+
+logger = logging.getLogger(__name__)
+
+_token_provider: Optional[Callable[[], str]] = None
+
+
+def _on_connect(client: mqtt.Client, userdata: dict, flags: dict, rc: int) -> None:
+    """Callback fired when the client connects (or reconnects) to the broker."""
+    if rc == 0:
+        topic = f"yl-home/{config.YOLINK_HOME_ID}/+/report"
+        client.subscribe(topic)
+        logger.info("MQTT connected — subscribed to %s", topic)
+    else:
+        logger.error("MQTT connect failed with code %d", rc)
+
+
+def _on_disconnect(client: mqtt.Client, userdata: dict, rc: int) -> None:
+    """Callback fired on disconnect; paho reconnect loop handles retry."""
+    logger.warning("MQTT disconnected (rc=%d) — will reconnect", rc)
+
+
+def _on_message(client: mqtt.Client, userdata: dict, msg: mqtt.MQTTMessage) -> None:
+    """Parse incoming MQTT message and persist THSensor readings to DB."""
+    try:
+        payload = json.loads(msg.payload.decode())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.error("Failed to parse MQTT payload: %s", exc)
+        return
+
+    event_type: str = payload.get("event", "")
+    device_id: str = payload.get("deviceId", "")
+
+    if not event_type.startswith("THSensor"):
+        logger.debug("Ignored event type: %s (device %s)", event_type, device_id)
+        return
+
+    data: dict = payload.get("data", {})
+    temperature: Optional[float] = data.get("temperature")
+    humidity: Optional[float] = data.get("humidity")
+    battery: Optional[int] = data.get("battery")
+
+    lora_info: dict = data.get("loraInfo", {})
+    signal_strength: Optional[int] = lora_info.get("signal")
+
+    logger.info(
+        "THSensor reading: device=%s temp=%s hum=%s bat=%s sig=%s",
+        device_id, temperature, humidity, battery, signal_strength,
+    )
+
+    try:
+        conn: pymysql.connections.Connection = get_connection()
+        try:
+            sensor_id = get_sensor_id(conn, device_id)
+            if sensor_id is None:
+                logger.warning("Unknown sensor %s — skipping reading", device_id)
+                return
+            insert_reading(conn, sensor_id, temperature, humidity, battery, signal_strength)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("DB error persisting reading for %s: %s", device_id, exc)
+
+
+def start_mqtt(token: str, token_provider: Optional[Callable[[], str]] = None) -> mqtt.Client:
+    """Create, configure, and start the MQTT client loop in a background thread.
+
+    Args:
+        token: Current YoLink access token (used as MQTT password).
+        token_provider: Optional callable that returns a fresh token on demand.
+                        Not used in the initial connection but stored for future use.
+
+    Returns:
+        The running mqtt.Client instance.
+    """
+    global _token_provider
+    _token_provider = token_provider
+
+    client = mqtt.Client()
+    client.username_pw_set(username=config.YOLINK_UAID, password=token)
+    client.on_connect = _on_connect
+    client.on_disconnect = _on_disconnect
+    client.on_message = _on_message
+
+    client.connect(config.YOLINK_MQTT_HOST, config.YOLINK_MQTT_PORT, keepalive=60)
+
+    # loop_start() runs the network loop in a background daemon thread
+    client.loop_start()
+    logger.info(
+        "MQTT loop started — broker=%s port=%d",
+        config.YOLINK_MQTT_HOST,
+        config.YOLINK_MQTT_PORT,
+    )
+    return client

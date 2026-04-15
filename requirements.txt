@@ -1,1 +1,3 @@
 # stdlib only — add external packages here when explicitly required
+pymysql
+paho-mqtt
