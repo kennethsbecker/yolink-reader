@@ -124,7 +124,7 @@ def start_mqtt(token: str, token_provider: Optional[Callable[[], str]] = None) -
     """Create, configure, and start the MQTT client loop in a background thread.
 
     Args:
-        token: Current YoLink access token (used as MQTT password).
+        token: Current YoLink access token (used as MQTT username).
         token_provider: Optional callable that returns a fresh token on demand.
                         Not used in the initial connection but stored for future use.
 
@@ -135,7 +135,7 @@ def start_mqtt(token: str, token_provider: Optional[Callable[[], str]] = None) -
     _token_provider = token_provider
 
     client = mqtt.Client()
-    client.username_pw_set(username=config.YOLINK_UAID, password=token)
+    client.username_pw_set(username=token, password="")
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
     client.on_message = _on_message
